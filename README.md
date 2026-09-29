@@ -13,7 +13,7 @@ Opinionated theme loader for Go CLI/TUI projects built on
 ## Install
 
 ```sh
-go get github.com/polymorcodeus/tint
+go get go.fuzzyporpoise.dev/tint
 ```
 
 ## Usage
@@ -24,7 +24,7 @@ package main
 import (
     "fmt"
 
-    "github.com/polymorcodeus/tint"
+    "go.fuzzyporpoise.dev/tint"
 )
 
 func main() {

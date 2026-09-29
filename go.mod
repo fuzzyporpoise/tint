@@ -1,4 +1,4 @@
-module github.com/polymorcodeus/tint
+module go.fuzzyporpoise.dev/tint
 
 go 1.26.4
 
