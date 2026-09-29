@@ -136,6 +136,202 @@ func TestColorKnownAndLiteral(t *testing.T) {
 	}
 }
 
+func writeThemeFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "theme.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestNewThemeEmptyConfigEqualsDefaults(t *testing.T) {
+	def := NewTheme(nil)
+	empty := NewTheme(&ThemeConfig{})
+
+	for name := range DefaultThemeConfig().Styles {
+		if got, want := empty.Style(name).Render("sample"), def.Style(name).Render("sample"); got != want {
+			t.Errorf("style %q: empty config = %q, want %q", name, got, want)
+		}
+	}
+	for name := range DefaultThemeConfig().Palette {
+		if got, want := empty.Color(name), def.Color(name); got != want {
+			t.Errorf("color %q: empty config = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestNewThemeSparseConfigKeepsDefaults(t *testing.T) {
+	th := NewTheme(&ThemeConfig{
+		Styles: map[string]StyleDef{
+			"highlight": {Foreground: "primary"},
+		},
+	})
+
+	if th.Style("primary").GetForeground() == nil {
+		t.Error("default primary style lost its foreground")
+	}
+	if th.Style("error").GetForeground() == nil {
+		t.Error("default error style lost its foreground")
+	}
+	if th.Color("error") == nil {
+		t.Error("default error color missing")
+	}
+}
+
+func TestNewThemePerNameReplace(t *testing.T) {
+	th := NewTheme(&ThemeConfig{
+		Styles: map[string]StyleDef{
+			"highlight": {Foreground: "primary"},
+		},
+	})
+
+	if th.Style("highlight").GetBold() {
+		t.Error("user highlight should replace the default and not be bold")
+	}
+	if !NewTheme(nil).Style("highlight").GetBold() {
+		t.Error("default highlight should be bold")
+	}
+}
+
+func TestLoadThemeConfigUnknownTopLevelKey(t *testing.T) {
+	path := writeThemeFile(t, `{"palette":{"primary":"#ff0000"},"extra":true}`)
+	_, err := LoadThemeConfig(path)
+	if err == nil {
+		t.Fatal("expected error for unknown top-level key")
+	}
+	if !strings.Contains(err.Error(), "extra") {
+		t.Errorf("error %q should name the offending key", err)
+	}
+}
+
+func TestLoadThemeConfigUnknownStyleField(t *testing.T) {
+	path := writeThemeFile(t, `{"styles":{"foo":{"foregound":"primary"}}}`)
+	_, err := LoadThemeConfig(path)
+	if err == nil {
+		t.Fatal("expected error for unknown style field")
+	}
+	if !strings.Contains(err.Error(), "foregound") {
+		t.Errorf("error %q should name the offending field", err)
+	}
+}
+
+func TestLoadThemeConfigUnknownHuhKey(t *testing.T) {
+	path := writeThemeFile(t, `{"huh":{"focussed_title":{"bold":true}}}`)
+	_, err := LoadThemeConfig(path)
+	if err == nil {
+		t.Fatal("expected error for unknown huh key")
+	}
+	if !strings.Contains(err.Error(), "focussed_title") {
+		t.Errorf("error %q should name the offending key", err)
+	}
+}
+
+func TestLoadThemeConfigBadPaletteReference(t *testing.T) {
+	path := writeThemeFile(t, `{"styles":{"foo":{"foreground":"primry"}}}`)
+	_, err := LoadThemeConfig(path)
+	if err == nil {
+		t.Fatal("expected error for unknown palette reference")
+	}
+	if !strings.Contains(err.Error(), "primry") {
+		t.Errorf("error %q should name the offending color", err)
+	}
+}
+
+func TestLoadThemeConfigBadPaletteValue(t *testing.T) {
+	path := writeThemeFile(t, `{"palette":{"primary":"notacolor"}}`)
+	_, err := LoadThemeConfig(path)
+	if err == nil {
+		t.Fatal("expected error for invalid palette value")
+	}
+	if !strings.Contains(err.Error(), "notacolor") {
+		t.Errorf("error %q should name the offending color", err)
+	}
+}
+
+func TestLoadThemeConfigValidFullOverride(t *testing.T) {
+	path := writeThemeFile(t, `{"palette":{"primary":"#123456"},"styles":{"primary":{"foreground":"primary","italic":true}},"huh":{"focused_title":{"bold":true}}}`)
+	cfg, err := LoadThemeConfig(path)
+	if err != nil {
+		t.Fatalf("load valid theme: %v", err)
+	}
+	th := NewTheme(cfg)
+	if !th.Style("primary").GetItalic() {
+		t.Error("user primary style should be italic")
+	}
+	if got := th.Color("primary"); got == nil {
+		t.Error("primary color missing after override")
+	}
+}
+
+func TestIsLiteralColor(t *testing.T) {
+	valid := []string{"", "none", "#ff0000", "#fff", "#ffff", "#ff0000ff", "red", "bright_red", "212", "0", "255"}
+	invalid := []string{"primry", "#gggggg", "#12345", "256", "-1", "notacolor"}
+	for _, v := range valid {
+		if !isLiteralColor(v) {
+			t.Errorf("isLiteralColor(%q) = false, want true", v)
+		}
+	}
+	for _, v := range invalid {
+		if isLiteralColor(v) {
+			t.Errorf("isLiteralColor(%q) = true, want false", v)
+		}
+	}
+}
+
+func TestDiffDefaults(t *testing.T) {
+	cfg := &ThemeConfig{
+		Palette: map[string]ColorSpec{
+			"primary": DefaultThemeConfig().Palette["primary"],
+		},
+		Styles: map[string]StyleDef{
+			"highlight": {Foreground: "primary"},
+			"custom":    {Bold: true},
+		},
+	}
+
+	diffs := cfg.DiffDefaults()
+	byKey := make(map[string]KeyDiff, len(diffs))
+	for _, d := range diffs {
+		byKey[d.Section+"."+d.Key] = d
+	}
+
+	if got := byKey["palette.primary"].Status; got != DiffRedundant {
+		t.Errorf("palette.primary = %q, want redundant", got)
+	}
+	if got := byKey["palette.error"].Status; got != DiffDefault {
+		t.Errorf("palette.error = %q, want default", got)
+	}
+
+	hl := byKey["styles.highlight"]
+	if hl.Status != DiffOverride {
+		t.Errorf("styles.highlight = %q, want override", hl.Status)
+	}
+	if len(hl.DroppedFields) != 1 || hl.DroppedFields[0] != "bold" {
+		t.Errorf("styles.highlight dropped fields = %v, want [bold]", hl.DroppedFields)
+	}
+
+	if got := byKey["styles.custom"].Status; got != DiffOverride {
+		t.Errorf("styles.custom = %q, want override", got)
+	}
+	if got := byKey["styles.primary"].Status; got != DiffDefault {
+		t.Errorf("styles.primary = %q, want default", got)
+	}
+
+	if !strings.Contains(hl.String(), "bold") {
+		t.Errorf("KeyDiff.String() = %q, should mention dropped bold", hl.String())
+	}
+}
+
+func TestDiffDefaultsNilIsAllDefault(t *testing.T) {
+	var cfg *ThemeConfig
+	for _, d := range cfg.DiffDefaults() {
+		if d.Status != DiffDefault {
+			t.Errorf("%s = %q, want default", d, d.Status)
+		}
+	}
+}
+
 func TestLipglossList(t *testing.T) {
 	th := NewTheme(nil)
 	out := LipglossList(th.Style("text"), []string{"one", "two"})

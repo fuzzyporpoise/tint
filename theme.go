@@ -3,11 +3,15 @@
 package tint
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image/color"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -35,7 +39,9 @@ func (c *ColorSpec) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	type alt ColorSpec
-	return json.Unmarshal(data, (*alt)(c))
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	return dec.Decode((*alt)(c))
 }
 
 // IsAdaptive reports whether the ColorSpec has light/dark variants.
@@ -77,10 +83,16 @@ type Theme struct {
 }
 
 // NewTheme compiles a ThemeConfig into a Theme with resolved colors and styles.
+//
+// The supplied config is always merged over DefaultThemeConfig(): unspecified
+// palette entries and styles fall back to the built-in defaults, so both
+// NewTheme(nil) and NewTheme(&ThemeConfig{}) produce the default theme. Merging
+// is per name and replaces wholesale, not field by field: a user palette entry
+// for "primary" replaces the default "primary", and a user StyleDef for a
+// style or huh key replaces that entry entirely. Omit a name to keep its
+// default.
 func NewTheme(cfg *ThemeConfig) *Theme {
-	if cfg == nil {
-		cfg = DefaultThemeConfig()
-	}
+	merged := mergeThemeConfig(DefaultThemeConfig(), cfg)
 
 	hasDark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
 
@@ -88,13 +100,13 @@ func NewTheme(cfg *ThemeConfig) *Theme {
 		hasDarkBg:      hasDark,
 		colors:         make(map[string]color.Color),
 		styles:         make(map[string]lipgloss.Style),
-		huhDefinitions: cfg.Huh,
+		huhDefinitions: merged.Huh,
 	}
 
-	for name, spec := range cfg.Palette {
+	for name, spec := range merged.Palette {
 		t.colors[name] = t.resolveColorSpec(spec)
 	}
-	for name, def := range cfg.Styles {
+	for name, def := range merged.Styles {
 		t.styles[name] = t.buildStyle(def)
 	}
 
@@ -125,93 +137,94 @@ func (t *Theme) HuhTheme(interactive bool) huh.ThemeFunc {
 			base = huh.ThemeCharm(isDark)
 		}
 
-		apply := func(target *lipgloss.Style, key string) {
-			if def, ok := t.huhDefinitions[key]; ok {
-				*target = t.overlayStyleDef(*target, def)
+		for _, ht := range huhTargets {
+			def, ok := t.huhDefinitions[ht.key]
+			if !ok {
+				continue
 			}
+			target := ht.target(base)
+			*target = t.overlayStyleDef(*target, def)
 		}
-
-		type item struct {
-			target *lipgloss.Style
-			key    string
-		}
-
-		applyAll := func(items []item) {
-			for _, it := range items {
-				apply(it.target, it.key)
-			}
-		}
-
-		applyAll([]item{
-			{&base.Focused.Title, "focused_title"},
-			{&base.Focused.Description, "focused_description"},
-			{&base.Focused.SelectedOption, "focused_selected_option"},
-			{&base.Focused.UnselectedOption, "focused_unselected_option"},
-			{&base.Focused.ErrorIndicator, "focused_error_indicator"},
-			{&base.Focused.ErrorMessage, "focused_error_message"},
-			{&base.Focused.SelectSelector, "focused_select_selector"},
-			{&base.Focused.NextIndicator, "focused_next_indicator"},
-			{&base.Focused.PrevIndicator, "focused_prev_indicator"},
-			{&base.Focused.FocusedButton, "focused_focused_button"},
-			{&base.Focused.BlurredButton, "focused_blurred_button"},
-			{&base.Focused.Directory, "focused_directory"},
-			{&base.Focused.File, "focused_file"},
-			{&base.Focused.Option, "focused_option"},
-			{&base.Focused.MultiSelectSelector, "focused_multi_select_selector"},
-			{&base.Focused.SelectedPrefix, "focused_selected_prefix"},
-			{&base.Focused.UnselectedPrefix, "focused_unselected_prefix"},
-			{&base.Focused.Card, "focused_card"},
-			{&base.Focused.NoteTitle, "focused_note_title"},
-			{&base.Focused.Next, "focused_next"},
-		})
-
-		applyAll([]item{
-			{&base.Blurred.Title, "blurred_title"},
-			{&base.Blurred.Description, "blurred_description"},
-			{&base.Blurred.SelectedOption, "blurred_selected_option"},
-			{&base.Blurred.UnselectedOption, "blurred_unselected_option"},
-			{&base.Blurred.ErrorIndicator, "blurred_error_indicator"},
-			{&base.Blurred.ErrorMessage, "blurred_error_message"},
-			{&base.Blurred.SelectSelector, "blurred_select_selector"},
-			{&base.Blurred.NextIndicator, "blurred_next_indicator"},
-			{&base.Blurred.PrevIndicator, "blurred_prev_indicator"},
-			{&base.Blurred.FocusedButton, "blurred_focused_button"},
-			{&base.Blurred.BlurredButton, "blurred_blurred_button"},
-			{&base.Blurred.Directory, "blurred_directory"},
-			{&base.Blurred.File, "blurred_file"},
-			{&base.Blurred.Option, "blurred_option"},
-			{&base.Blurred.MultiSelectSelector, "blurred_multi_select_selector"},
-			{&base.Blurred.SelectedPrefix, "blurred_selected_prefix"},
-			{&base.Blurred.UnselectedPrefix, "blurred_unselected_prefix"},
-			{&base.Blurred.Card, "blurred_card"},
-			{&base.Blurred.NoteTitle, "blurred_note_title"},
-			{&base.Blurred.Next, "blurred_next"},
-		})
-
-		applyAll([]item{
-			{&base.Focused.TextInput.Cursor, "focused_textinput_cursor"},
-			{&base.Focused.TextInput.CursorText, "focused_textinput_cursor_text"},
-			{&base.Focused.TextInput.Placeholder, "focused_textinput_placeholder"},
-			{&base.Focused.TextInput.Prompt, "focused_textinput_prompt"},
-			{&base.Focused.TextInput.Text, "focused_textinput_text"},
-		})
-
-		applyAll([]item{
-			{&base.Blurred.TextInput.Cursor, "blurred_textinput_cursor"},
-			{&base.Blurred.TextInput.CursorText, "blurred_textinput_cursor_text"},
-			{&base.Blurred.TextInput.Placeholder, "blurred_textinput_placeholder"},
-			{&base.Blurred.TextInput.Prompt, "blurred_textinput_prompt"},
-			{&base.Blurred.TextInput.Text, "blurred_textinput_text"},
-		})
-
-		applyAll([]item{
-			{&base.Group.Title, "group_title"},
-			{&base.Group.Description, "group_description"},
-		})
 
 		return base
 	})
 }
+
+// huhTarget pairs a huh style key with an accessor that resolves the matching
+// *lipgloss.Style on a freshly built *huh.Styles. It is the single source of
+// truth for both applying overrides and validating huh keys.
+type huhTarget struct {
+	key    string
+	target func(*huh.Styles) *lipgloss.Style
+}
+
+var huhTargets = []huhTarget{
+	{"focused_title", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.Title }},
+	{"focused_description", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.Description }},
+	{"focused_selected_option", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.SelectedOption }},
+	{"focused_unselected_option", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.UnselectedOption }},
+	{"focused_error_indicator", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.ErrorIndicator }},
+	{"focused_error_message", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.ErrorMessage }},
+	{"focused_select_selector", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.SelectSelector }},
+	{"focused_next_indicator", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.NextIndicator }},
+	{"focused_prev_indicator", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.PrevIndicator }},
+	{"focused_focused_button", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.FocusedButton }},
+	{"focused_blurred_button", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.BlurredButton }},
+	{"focused_directory", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.Directory }},
+	{"focused_file", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.File }},
+	{"focused_option", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.Option }},
+	{"focused_multi_select_selector", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.MultiSelectSelector }},
+	{"focused_selected_prefix", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.SelectedPrefix }},
+	{"focused_unselected_prefix", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.UnselectedPrefix }},
+	{"focused_card", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.Card }},
+	{"focused_note_title", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.NoteTitle }},
+	{"focused_next", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.Next }},
+
+	{"blurred_title", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.Title }},
+	{"blurred_description", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.Description }},
+	{"blurred_selected_option", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.SelectedOption }},
+	{"blurred_unselected_option", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.UnselectedOption }},
+	{"blurred_error_indicator", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.ErrorIndicator }},
+	{"blurred_error_message", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.ErrorMessage }},
+	{"blurred_select_selector", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.SelectSelector }},
+	{"blurred_next_indicator", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.NextIndicator }},
+	{"blurred_prev_indicator", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.PrevIndicator }},
+	{"blurred_focused_button", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.FocusedButton }},
+	{"blurred_blurred_button", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.BlurredButton }},
+	{"blurred_directory", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.Directory }},
+	{"blurred_file", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.File }},
+	{"blurred_option", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.Option }},
+	{"blurred_multi_select_selector", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.MultiSelectSelector }},
+	{"blurred_selected_prefix", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.SelectedPrefix }},
+	{"blurred_unselected_prefix", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.UnselectedPrefix }},
+	{"blurred_card", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.Card }},
+	{"blurred_note_title", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.NoteTitle }},
+	{"blurred_next", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.Next }},
+
+	{"focused_textinput_cursor", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.TextInput.Cursor }},
+	{"focused_textinput_cursor_text", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.TextInput.CursorText }},
+	{"focused_textinput_placeholder", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.TextInput.Placeholder }},
+	{"focused_textinput_prompt", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.TextInput.Prompt }},
+	{"focused_textinput_text", func(s *huh.Styles) *lipgloss.Style { return &s.Focused.TextInput.Text }},
+
+	{"blurred_textinput_cursor", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.TextInput.Cursor }},
+	{"blurred_textinput_cursor_text", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.TextInput.CursorText }},
+	{"blurred_textinput_placeholder", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.TextInput.Placeholder }},
+	{"blurred_textinput_prompt", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.TextInput.Prompt }},
+	{"blurred_textinput_text", func(s *huh.Styles) *lipgloss.Style { return &s.Blurred.TextInput.Text }},
+
+	{"group_title", func(s *huh.Styles) *lipgloss.Style { return &s.Group.Title }},
+	{"group_description", func(s *huh.Styles) *lipgloss.Style { return &s.Group.Description }},
+}
+
+// knownHuhKeys is the set of huh keys HuhTheme can apply.
+var knownHuhKeys = func() map[string]bool {
+	m := make(map[string]bool, len(huhTargets))
+	for _, ht := range huhTargets {
+		m[ht.key] = true
+	}
+	return m
+}()
 
 // -----------------------------------------------------------------------------
 // Interactive Helpers
@@ -255,8 +268,10 @@ func LipglossList(gloss lipgloss.Style, items []string) string {
 // File Loading
 // -----------------------------------------------------------------------------
 
-// LoadThemeConfig reads and parses a theme.json file into a ThemeConfig.
-// A missing file is returned as an error so callers can decide whether to
+// LoadThemeConfig reads, strictly decodes, and validates a theme.json file into
+// a ThemeConfig. Unknown keys (top-level, style fields, and huh keys) and
+// invalid palette references are rejected with an error naming the offending
+// key. A missing file is returned as an error so callers can decide whether to
 // fall back to defaults.
 func LoadThemeConfig(path string) (*ThemeConfig, error) {
 	if path == "" {
@@ -269,10 +284,226 @@ func LoadThemeConfig(path string) (*ThemeConfig, error) {
 	}
 
 	var cfg ThemeConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse theme %q: %w", path, err)
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("theme file %q: %w", path, err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("theme file %q: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// Validate reports whether the config uses only recognized keys and colors.
+// Palette values must be literal colors (hex, ANSI 256 index, ANSI name,
+// "none", or empty). Style and huh color fields must reference a palette entry
+// (from this config or the built-in defaults) or a literal color. Since
+// NewTheme merges over DefaultThemeConfig, the default palette names are
+// accepted here as well.
+func (c *ThemeConfig) Validate() error {
+	if err := c.validatePalette(); err != nil {
+		return err
+	}
+
+	knownColors := map[string]bool{}
+	for name := range DefaultThemeConfig().Palette {
+		knownColors[name] = true
+	}
+	for name := range c.Palette {
+		knownColors[name] = true
+	}
+
+	for name, def := range c.Styles {
+		if err := validateStyleDef(def, knownColors); err != nil {
+			return fmt.Errorf("style %q: %w", name, err)
+		}
+	}
+
+	for key, def := range c.Huh {
+		if !knownHuhKeys[key] {
+			return fmt.Errorf("unknown huh key %q", key)
+		}
+		if err := validateStyleDef(def, knownColors); err != nil {
+			return fmt.Errorf("huh %q: %w", key, err)
+		}
+	}
+
+	return nil
+}
+
+func (c *ThemeConfig) validatePalette() error {
+	for name, spec := range c.Palette {
+		if spec.IsAdaptive() {
+			for _, v := range []string{spec.Light, spec.Dark} {
+				if !isLiteralColor(v) {
+					return fmt.Errorf("palette %q: unknown color %q", name, v)
+				}
+			}
+			continue
+		}
+		if !isLiteralColor(spec.Raw) {
+			return fmt.Errorf("palette %q: unknown color %q", name, spec.Raw)
+		}
+	}
+	return nil
+}
+
+func validateStyleDef(def StyleDef, knownColors map[string]bool) error {
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{"foreground", def.Foreground},
+		{"background", def.Background},
+		{"border_foreground", def.BorderForeground},
+	}
+	for _, f := range fields {
+		v := strings.TrimSpace(f.value)
+		if v == "" {
+			continue
+		}
+		if knownColors[v] || isLiteralColor(v) {
+			continue
+		}
+		return fmt.Errorf("unknown color reference %q in field %q", f.value, f.name)
+	}
+	return nil
+}
+
+// -----------------------------------------------------------------------------
+// Comparing against the defaults
+// -----------------------------------------------------------------------------
+
+// DiffStatus classifies a single config key relative to the built-in defaults.
+type DiffStatus string
+
+const (
+	// DiffDefault means the key is absent from the user config, so the
+	// built-in default applies.
+	DiffDefault DiffStatus = "default"
+	// DiffRedundant means the key is present in the user config but identical
+	// to the built-in default, so it can be removed with no behavior change.
+	DiffRedundant DiffStatus = "redundant"
+	// DiffOverride means the key is present and differs from the built-in
+	// default (or has no default at all, for user-added styles).
+	DiffOverride DiffStatus = "override"
+)
+
+// KeyDiff describes how one config key relates to the built-in defaults.
+type KeyDiff struct {
+	// Section is one of "palette", "styles", or "huh".
+	Section string
+	// Key is the palette name, style name, or huh key.
+	Key string
+	// Status classifies the key.
+	Status DiffStatus
+	// DroppedFields lists default fields that a wholesale override no longer
+	// sets, so the effective style loses them. It is only populated for
+	// "styles" and "huh" overrides.
+	DroppedFields []string
+}
+
+// String renders the diff as a single human-readable line.
+func (d KeyDiff) String() string {
+	s := fmt.Sprintf("%s.%s: %s", d.Section, d.Key, d.Status)
+	if len(d.DroppedFields) > 0 {
+		s += fmt.Sprintf(" (drops default fields: %s)", strings.Join(d.DroppedFields, ", "))
+	}
+	return s
+}
+
+// DiffDefaults compares the config against DefaultThemeConfig and reports, for
+// every palette entry, style, and huh key, whether the user config leaves it at
+// the default, repeats the default verbatim (redundant), or overrides it.
+//
+// The result is sorted by section then key. For overrides of styles and huh
+// keys it also lists any default fields the override no longer sets, which is
+// the wholesale-replace trap: a user "highlight" that omits "bold" is reported
+// as an override that drops "bold".
+//
+// DiffDefaults does not validate; pair it with Validate to catch unknown keys.
+func (c *ThemeConfig) DiffDefaults() []KeyDiff {
+	if c == nil {
+		c = &ThemeConfig{}
+	}
+	def := DefaultThemeConfig()
+
+	var diffs []KeyDiff
+	diffs = append(diffs, diffPalette(def.Palette, c.Palette)...)
+	diffs = append(diffs, diffStyles("styles", def.Styles, c.Styles)...)
+	diffs = append(diffs, diffStyles("huh", def.Huh, c.Huh)...)
+	return diffs
+}
+
+func diffPalette(def, user map[string]ColorSpec) []KeyDiff {
+	var diffs []KeyDiff
+	for _, name := range unionKeys(def, user) {
+		d := KeyDiff{Section: "palette", Key: name}
+		u, ok := user[name]
+		switch {
+		case !ok:
+			d.Status = DiffDefault
+		case u == def[name]:
+			d.Status = DiffRedundant
+		default:
+			d.Status = DiffOverride
+		}
+		diffs = append(diffs, d)
+	}
+	return diffs
+}
+
+func diffStyles(section string, def, user map[string]StyleDef) []KeyDiff {
+	var diffs []KeyDiff
+	for _, name := range unionKeys(def, user) {
+		d := KeyDiff{Section: section, Key: name}
+		u, ok := user[name]
+		switch {
+		case !ok:
+			d.Status = DiffDefault
+		case u == def[name]:
+			d.Status = DiffRedundant
+		default:
+			d.Status = DiffOverride
+			d.DroppedFields = droppedStyleFields(def[name], u)
+		}
+		diffs = append(diffs, d)
+	}
+	return diffs
+}
+
+// unionKeys returns the sorted union of the keys of two maps.
+func unionKeys[V any](a, b map[string]V) []string {
+	set := make(map[string]struct{}, len(a)+len(b))
+	for k := range a {
+		set[k] = struct{}{}
+	}
+	for k := range b {
+		set[k] = struct{}{}
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
+// droppedStyleFields returns the names of fields set in def but not in user.
+func droppedStyleFields(def, user StyleDef) []string {
+	var dropped []string
+	add := func(name string, present bool) {
+		if present {
+			dropped = append(dropped, name)
+		}
+	}
+	add("foreground", def.Foreground != "" && user.Foreground == "")
+	add("background", def.Background != "" && user.Background == "")
+	add("border_foreground", def.BorderForeground != "" && user.BorderForeground == "")
+	add("bold", def.Bold && !user.Bold)
+	add("italic", def.Italic && !user.Italic)
+	add("underline", def.Underline && !user.Underline)
+	add("strikethrough", def.Strikethrough && !user.Strikethrough)
+	add("faint", def.Faint && !user.Faint)
+	add("blink", def.Blink && !user.Blink)
+	add("reverse", def.Reverse && !user.Reverse)
+	return dropped
 }
 
 // -----------------------------------------------------------------------------
@@ -309,6 +540,77 @@ func DefaultThemeConfig() *ThemeConfig {
 			"blurred_description":     {Foreground: "243", Italic: true},
 		},
 	}
+}
+
+// mergeThemeConfig returns a fresh config with override merged over base.
+// Merging is per name and replaces wholesale: palette entries, styles, and huh
+// keys from override replace the base entry of the same name. The base maps are
+// copied so the result never aliases shared default state.
+func mergeThemeConfig(base, override *ThemeConfig) *ThemeConfig {
+	merged := &ThemeConfig{
+		Palette: maps.Clone(base.Palette),
+		Styles:  maps.Clone(base.Styles),
+		Huh:     maps.Clone(base.Huh),
+	}
+	if override == nil {
+		return merged
+	}
+	maps.Copy(merged.Palette, override.Palette)
+	maps.Copy(merged.Styles, override.Styles)
+	maps.Copy(merged.Huh, override.Huh)
+	return merged
+}
+
+// isLiteralColor reports whether v is a recognized literal color: a hex value,
+// an ANSI 256 index, a known ANSI name, "none", or empty. Unlike
+// parseLiteralColor, which accepts any string as a lipgloss color, this rejects
+// typos so validation can report them.
+func isLiteralColor(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+
+	switch v {
+	case "", "none",
+		"black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+		"brightblack", "bright_black", "gray", "grey",
+		"brightred", "bright_red", "brightgreen", "bright_green",
+		"brightyellow", "bright_yellow", "brightblue", "bright_blue",
+		"brightmagenta", "bright_magenta", "brightcyan", "bright_cyan",
+		"brightwhite", "bright_white":
+		return true
+	}
+
+	if strings.HasPrefix(v, "#") {
+		return isHexColor(v)
+	}
+
+	if n, err := strconv.Atoi(v); err == nil {
+		return n >= 0 && n <= 255
+	}
+
+	return false
+}
+
+// isHexColor reports whether v is a "#"-prefixed hex color with 3, 4, 6, or 8
+// digits.
+func isHexColor(v string) bool {
+	if len(v) < 2 || v[0] != '#' {
+		return false
+	}
+	digits := v[1:]
+	switch len(digits) {
+	case 3, 4, 6, 8:
+	default:
+		return false
+	}
+	for _, r := range digits {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (t *Theme) resolveColorSpec(spec ColorSpec) color.Color {
