@@ -35,7 +35,7 @@ changelog:
 
 release:
   github:
-    owner: polymorcodeus
+    owner: fuzzyporpoise
     name: tint
   draft: false
   prerelease: auto
@@ -43,4 +43,4 @@ release:
 
   footer: |
     ---
-    **Full Changelog**: https://github.com/polymorcodeus/tint/compare/{{.PreviousTag}}...{{.Tag}}
+    **Full Changelog**: https://github.com/fuzzyporpoise/tint/compare/{{.PreviousTag}}...{{.Tag}}
