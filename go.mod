@@ -1,10 +1,10 @@
 module go.fuzzyporpoise.dev/tint
 
-go 1.26.4
+go 1.26.7
 
 require (
 	charm.land/huh/v2 v2.0.3
-	charm.land/lipgloss/v2 v2.0.6
+	charm.land/lipgloss/v2 v2.1.0
 )
 
 require (
